@@ -1,10 +1,13 @@
 import logging
 
 from bson import ObjectId
+from pymongo.collation import Collation  # noqa
 from pymongo.collection import Collection as PyMongoCollection
 from pymongo.database import Database  # noqa
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import OperationFailure
 from pymongo.results import InsertOneResult  # noqa
+from pymongo.results import UpdateResult
 
 
 class Collection(PyMongoCollection):
@@ -108,3 +111,36 @@ class Collection(PyMongoCollection):
                         "An orphaned record may have been left in the audit"
                         " collection.")
                     raise
+
+    def update_one(
+            self, filter, update, upsert=False,
+            bypass_document_validation=False, collation=None, audit=None):
+        # type: (dict, dict, bool, bool, Collation, dict) -> UpdateResult
+        try:
+            revision = ObjectId()
+            original_document = self.collection.find_one(filter)
+            if original_document is None:
+                if upsert:
+                    return self.insert_one(update, bypass_document_validation)
+                return UpdateResult(None, 0)
+
+            document = dict(original_document)
+            document['document_id'] = document['_id']
+            document['_id'] = revision
+            document[self.revision_field] = revision
+
+            bulk = self.audit_collection.initialize_ordered_bulk_op(
+                bypass_document_validation)
+            bulk.insert(document)
+            bulk.find({'_id': document['_id']}).update_one(update)
+            bulk.execute()
+            update_result = self.collection.update_one(
+                original_document, update,
+                bypass_document_validation=bypass_document_validation,
+                collation=collation)
+            if update_result.matched_count == 0:
+                raise OperationFailure('Optimistic lock failed')
+        except (DuplicateKeyError, OperationFailure):
+            return
+            # try:
+            #     self.audit_collection.delete_one({'_id': })
