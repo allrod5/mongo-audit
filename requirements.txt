@@ -1,0 +1,5 @@
+pymongo
+pytest
+pytest-cov
+pytest-mock
+flake8
